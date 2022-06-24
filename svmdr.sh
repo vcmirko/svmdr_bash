@@ -1,10 +1,11 @@
 #!/bin/bash
 ###########################################
-# VERSION 1.0.1
+# VERSION 1.0.2
 # AUTHOR Mirko Van Colen - mirko@netapp.com
 # UPDATES
 # 1.0.0 : initial version
 # 1.0.1 : Added abort functionality
+# 1.0.2 : anticipate svm start burt
 ###########################################
 
 # variables
@@ -400,7 +401,7 @@ invoke_sm_update(){
   log_verbose "Waiting for transfer to finish"
   local transfer=$(rest "${host[$drdestination]}" "${sm_uri[$drdestination]}transfers/?fields=state" ".records[0].state")
   local watchdog=0
-  while [ ! -z $transfer  -a "$watchdog" -lt "$transferTimeoutSeconds" ]
+  while [ ! -z "$transfer" -a "$watchdog" -lt "$transferTimeoutSeconds" ]
   do
     log_info "... $transfer"
     sleep 1s
@@ -443,12 +444,23 @@ wait_job(){
   if [ "$uri" != "" ]; then
     log_info "Waiting for job to finish"
     local jobstate=$(rest "${host[$drdestination]}" "$uri" ".state")
-    while [ "$jobstate" != "success" ] && [ "$jobstate" != "error" ]
+    local jobmessage=$(rest "${host[$drdestination]}" "$uri" ".message")
+    log_info "... $jobstate : $jobmessage"
+    while [ "$jobstate" != "success" ] && [ "$jobstate" != "error" ] && [ "$jobstate" != "failure" ]
     do
-      log_info "... $jobstate"
+      log_info "... $jobstate : $jobmessage"
       sleep 1s
       jobstate=$(rest "${host[$drdestination]}" "$uri" ".state")
+      jobmessage=$(rest "${host[$drdestination]}" "$uri" ".message")
     done
+    if [[ "$jobmessage" == *"You cannot start the SVM when command confirmations are disabled"* ]]; then
+      log_error "... hitting burt 1322362... ignoring failure"
+    fi
+    if [[ "$jobmessage" == *"management configuration for this Vserver is locked"* ]]; then
+      log_error "... due to powerfailure the svm configuration is locked, manual intervention required"
+      log_error "... this happens in very rare occasions"
+      log_error "... manually unlock and start the svm, ssh to source cluster $cluster1 and type 'vserver unlock -vserver $svm1 -force true;vserver start -vserver $svm1'"
+    fi
   else
     log_error "[ wait_job ] expected joburi ; but got nothing [$uri]"
   fi
@@ -492,6 +504,7 @@ force_failover(){
     currentstate=$(rest "$host" "$uri?fields=state" ".state")
   done
   log_success "... $currentstate"
+  set_state "${host[$drdestination]}" "${svm_uri[$drdestination]}" "running" "Starting dr svm '${svm[$drdestination]}'" "svm"
 }
 invoke_resync(){
   # invokes a resync action
@@ -555,6 +568,7 @@ invoke_dr(){
   	  set_state "${host[$drdestination]}" "${svm_uri[$drdestination]}" "running" "Starting dr svm '${svm[$drdestination]}'" "svm"
     else
       log_info "Performing forced failover"
+      invoke_sm_abort
       force_failover "${host[$drdestination]}" "${sm_uri[$drdestination]}" "broken_off" "Breaking snapmirror" "snapmirror"
     fi
 
